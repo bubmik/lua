@@ -1,0 +1,115 @@
+local RH, Y0 = 24, 8
+local wnd = gui.Window("ta_wnd", "Teammate Aimlock", 100, 100, 250, 250)
+
+local function row(c, n)
+    c:SetPosY(Y0 + n * RH)
+    c:SetPosX(8)
+    return c
+end
+
+local ta_enable = row(gui.Checkbox(wnd, "ta_enable", "Enable", false), 0)
+local ta_draw = row(gui.Checkbox(wnd, "ta_draw", "Draw Target", true), 1)
+local ta_key = row(gui.Keybox(wnd, "ta_key", "Aim Key", 0), 2)
+local ta_smooth = row(gui.Slider(wnd, "ta_smooth", "Smooth", 100, 1, 100), 3)
+local ta_fov = row(gui.Slider(wnd, "ta_fov", "FOV", 180, 1, 180), 4)
+local ta_color = row(gui.ColorPicker(wnd, "ta_color", "Target", 255, 60, 60, 255), 5)
+
+local menu = gui.Reference("MENU")
+local current_target = nil
+
+local function NormalizeYaw(yaw)
+    while yaw > 180 do yaw = yaw - 360 end
+    while yaw < -180 do yaw = yaw + 360 end
+    return yaw
+end
+
+local function CalcAngle(src, dst)
+    local dx, dy, dz = dst.x - src.x, dst.y - src.y, dst.z - src.z
+    local hyp = math.sqrt(dx * dx + dy * dy)
+    return -math.deg(math.atan2(dz, hyp)), NormalizeYaw(math.deg(math.atan2(dy, dx)))
+end
+
+local function GetViewAngles(cmd)
+    local ok, ang = pcall(function() return cmd:GetViewAngles() end)
+    return (ok and ang) and ang or engine.GetViewAngles()
+end
+
+local function SetViewAngles(cmd, pitch, yaw)
+    local ang = EulerAngles(pitch, NormalizeYaw(yaw), 0)
+    pcall(function() cmd:SetViewAngles(ang) end)
+    pcall(function() cmd.viewangles = ang end)
+    pcall(function() engine.SetViewAngles(ang) end)
+end
+
+local function GetClosestTeammate(cmd)
+    local lp = entities.GetLocalPawn()
+    if not lp or not lp:IsAlive() then return nil end
+
+    local eye = lp:GetAbsOrigin() + Vector3(0, 0, 64)
+    local view = GetViewAngles(cmd)
+    local best, best_fov = nil, math.huge
+
+    for _, ent in pairs(entities.FindByClass("C_CSPlayerPawn")) do
+        if ent and ent:IsAlive() and ent:GetIndex() ~= lp:GetIndex() and ent:GetTeamNumber() == lp:GetTeamNumber() then
+            local head = ent:GetHitboxPosition(0)
+            if head then
+                local pitch, yaw = CalcAngle(eye, head)
+                local fov = math.sqrt((NormalizeYaw(yaw - view.y))^2 + (pitch - view.x)^2)
+                if fov < best_fov and fov <= ta_fov:GetValue() then
+                    best_fov, best = fov, ent
+                end
+            end
+        end
+    end
+    return best
+end
+
+callbacks.Register("CreateMove", function(cmd)
+    if not ta_enable:GetValue() then current_target = nil return end
+    
+    local key = ta_key:GetValue()
+    if key ~= 0 and not input.IsButtonDown(key) then current_target = nil return end
+
+    local lp = entities.GetLocalPawn()
+    if not lp or not lp:IsAlive() then current_target = nil return end
+
+    local target = GetClosestTeammate(cmd)
+    if not target then current_target = nil return end
+
+    current_target = target
+    local head = target:GetHitboxPosition(0)
+    if not head then return end
+
+    local eye = lp:GetAbsOrigin() + Vector3(0, 0, 64)
+    local t_pitch, t_yaw = CalcAngle(eye, head)
+    local cur = GetViewAngles(cmd)
+    local smooth = ta_smooth:GetValue() / 100
+
+    local pitch = cur.x + (t_pitch - cur.x) * smooth
+    local yaw = cur.y + NormalizeYaw(t_yaw - cur.y) * smooth
+
+    SetViewAngles(cmd, pitch, yaw)
+end)
+
+callbacks.Register("Draw", function()
+    wnd:SetInvisible(not menu:IsActive())
+
+    if not ta_draw:GetValue() or not current_target or not current_target:IsAlive() then return end
+
+    local head = current_target:GetHitboxPosition(0)
+    if not head then return end
+
+    local x, y = client.WorldToScreen(head)
+    if not x or not y then return end
+
+    local r, g, b, a = ta_color:GetValue()
+    local pulse = math.abs(math.sin(globals.RealTime() * 4))
+    local radius = 12 + pulse * 5
+
+    draw.Color(r, g, b, a)
+    draw.OutlinedCircle(x, y, radius)
+    draw.Color(r, g, b, a * 0.25)
+    draw.FilledCircle(x, y, radius - 2)
+    draw.Color(255, 255, 255, 255)
+    draw.FilledCircle(x, y, 2)
+end)
